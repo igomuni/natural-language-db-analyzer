@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 import numpy as np
 import pandas as pd
 import random
-from scripts.prepare_data import prepare_database
+# prepare_data.py はもう不要なので、インポートを削除します
 
 # --- 初期設定 ---
 load_dotenv()
@@ -16,30 +16,52 @@ try: genai.configure(api_key=api_key)
 except Exception as e: st.error(f"APIキーの設定中にエラーが発生しました: {e}"); st.stop()
 DB_FILE = os.path.join("data", "review.db")
 TABLE_NAME = "main_data"
+DATA_URL = "https://rssystem.go.jp/files/2024/rs/5-1_RS_2024_%E6%94%AF%E5%87%BA%E5%85%88_%E6%94%AF%E5%87%BA%E6%83%85%E5%A0%B1.zip"
+CSV_FILE_NAME = "5-1_RS_2024_支出先_支出情報.csv" 
 
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+# 修正点1: データベースの準備と接続を、完全に一つのキャッシュ関数に統合する
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 @st.cache_resource
 def get_db_connection():
     """
-    初回実行時にDBを準備し、DuckDBへの接続オブジェクトを返す。
-    @st.cache_resourceにより、この接続はセッション中で再利用される。
+    DuckDBへの接続を確立し、必要であればテーブルを初期化する。
+    この関数全体がキャッシュされるため、初回実行時のみDB準備が走る。
     """
-    if not os.path.exists(DB_FILE):
+    # まず接続を確立する（ファイルがなければ空のDBが作成される）
+    conn = duckdb.connect(DB_FILE)
+    
+    # テーブルが存在するかどうかを確認
+    tables = conn.execute("SHOW TABLES").fetchdf()
+    
+    # もし 'main_data' テーブルが存在しなければ、準備処理を実行
+    if TABLE_NAME not in tables['name'].values:
         with st.spinner('初回起動のため、データをダウンロードしデータベースを構築しています...（数分かかります）'):
             try:
-                prepare_database()
+                # prepare_data.py のロジックをここに直接記述
+                import requests
+                import zipfile
+                import io
+
+                if not os.path.exists("data"):
+                    os.makedirs("data")
+
+                response = requests.get(DATA_URL, stream=True)
+                response.raise_for_status()
+                zip_content = response.content
+
+                with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
+                    with z.open(CSV_FILE_NAME) as f:
+                        df = pd.read_csv(f, encoding='utf-8-sig', low_memory=False)
+                
+                # 既存の接続(conn)を使ってテーブルを作成
+                conn.execute(f"CREATE TABLE {TABLE_NAME} AS SELECT * FROM df")
+
             except Exception as e:
                 st.error(f"データベースの準備中に致命的なエラーが発生しました: {e}")
-                raise e
-    
-    try:
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        # 修正点: read_only=True を削除し、より堅牢なデフォルトの接続モードを使用する
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        conn = duckdb.connect(DB_FILE)
-        return conn
-    except Exception as e:
-        st.error(f"データベースへの接続に失敗しました: {e}")
-        raise e
+                raise e # エラーを発生させてアプリを停止
+                
+    return conn
 
 # --- Streamlit UI ---
 st.title("自然言語DB分析ツール 💬")
@@ -47,8 +69,8 @@ st.caption("行政事業レビューデータを元に、自然言語で質問�
 
 conn = get_db_connection()
 
-# (以降のコードは変更なし。念のため完全なコードを記載)
-
+# (以降のコードは、get_schema_infoの呼び出し以外はほぼ同じ)
+# (念のため、完全なコードを記載します)
 def get_schema_info(conn):
     try:
         schema_df = conn.execute(f"DESCRIBE {TABLE_NAME};").fetchdf()
@@ -59,7 +81,7 @@ def get_schema_info(conn):
 
 schema_info = get_schema_info(conn)
 if schema_info is None:
-    st.warning("データベーススキーマの取得に失敗しました。アプリのログを確認してください。")
+    st.error("データベーススキーマの取得に失敗しました。アプリを再起動してみてください。")
     st.stop()
 
 # (以降、残りのすべてのコードを記載)
