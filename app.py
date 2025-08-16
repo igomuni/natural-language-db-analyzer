@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 import numpy as np
 import pandas as pd
 import random
-# prepare_data.py はもう不要なので、インポートを削除します
 
 # --- 初期設定 ---
 load_dotenv()
@@ -40,20 +39,29 @@ def get_db_connection():
                     os.makedirs("data")
                 
                 # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-                # 修正点: ブラウザを偽装するためのUser-Agentヘッダーを追加
+                # 修正点: サーバーのブロックを回避するため、より完全なブラウザヘッダーを追加
                 # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
                 headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                    "Referer": "https://www.digital.go.jp/", # 参照元ページを偽装
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
                 }
                 response = requests.get(DATA_URL, headers=headers, stream=True)
                 response.raise_for_status()
                 zip_content = response.content
 
-                with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
-                    with z.open(CSV_FILE_NAME) as f:
-                        df = pd.read_csv(f, encoding='utf-8-sig', low_memory=False)
-                
-                conn.execute(f"CREATE TABLE {TABLE_NAME} AS SELECT * FROM df")
+                try:
+                    with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
+                        with z.open(CSV_FILE_NAME) as f:
+                            df = pd.read_csv(f, encoding='utf-8-sig', low_memory=False)
+                    conn.execute(f"CREATE TABLE {TABLE_NAME} AS SELECT * FROM df")
+                except zipfile.BadZipFile:
+                    # ★★★ デバッグ機能: もしZIPファイルでなかった場合、中身を表示する ★★★
+                    st.error("ダウンロードしたファイルがZIP形式ではありませんでした。サーバーからアクセスが拒否された可能性があります。")
+                    st.error(f"ダウンロードされたコンテンツのプレビュー（最初の500文字）: {zip_content[:500]}")
+                    raise
 
             except Exception as e:
                 st.error(f"データベースの準備中に致命的なエラーが発生しました: {e}")
