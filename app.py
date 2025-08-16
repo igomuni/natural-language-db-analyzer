@@ -17,9 +17,6 @@ except Exception as e: st.error(f"APIキーの設定中にエラーが発生し�
 DB_FILE = os.path.join("data", "review.db")
 TABLE_NAME = "main_data"
 
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-# 修正点1: データベース接続をキャッシュする、新しい中心的な関数を定義
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 @st.cache_resource
 def get_db_connection():
     """
@@ -32,24 +29,26 @@ def get_db_connection():
                 prepare_database()
             except Exception as e:
                 st.error(f"データベースの準備中に致命的なエラーが発生しました: {e}")
-                # st.stop() はキャッシュ関数内では使えないため、例外を発生させて処理を止める
                 raise e
     
-    # データベースへの接続を確立して返す
     try:
-        conn = duckdb.connect(DB_FILE, read_only=True) # 読み取り専用で接続
+        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        # 修正点: read_only=True を削除し、より堅牢なデフォルトの接続モードを使用する
+        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        conn = duckdb.connect(DB_FILE)
         return conn
     except Exception as e:
         st.error(f"データベースへの接続に失敗しました: {e}")
         raise e
 
-# --- LLMとプロンプトの設定 ---
-try: model = genai.GenerativeModel('gemini-1.5-flash')
-except Exception as e: st.error(f"Geminiモデルの読み込み中にエラーが発生しました: {e}"); st.stop()
+# --- Streamlit UI ---
+st.title("自然言語DB分析ツール 💬")
+st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
 
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-# 修正点2: 全てのDB操作関数が、引数として接続オブジェクト(conn)を受け取るように変更
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+conn = get_db_connection()
+
+# (以降のコードは変更なし。念のため完全なコードを記載)
+
 def get_schema_info(conn):
     try:
         schema_df = conn.execute(f"DESCRIBE {TABLE_NAME};").fetchdf()
@@ -58,56 +57,12 @@ def get_schema_info(conn):
         return schema_str
     except Exception as e: st.error(f"データベースのスキーマ情報取得中にエラーが発生しました: {e}"); return None
 
-def execute_sql(conn, sql_query):
-    try:
-        result_df = conn.execute(sql_query).fetchdf()
-        return result_df
-    except Exception as e:
-        st.error(f"SQLの実行中にエラーが発生しました: {e}"); st.error(f"実行しようとしたSQL: \n```sql\n{sql_query}\n```"); return None
-
-def create_prompt(user_question, schema_info):
-    # (この関数の中身は変更なし)
-    system_prompt = f"""
-あなたは、日本の行政事業レビューデータを分析する優秀なSQLデータアナリストです。
-`{TABLE_NAME}` という名前のテーブルを持つDuckDBデータベースを操作する前提で、以下のタスクを実行してください。
-{schema_info}
-# 主要な列の解説
-- "府省庁": 事業を所管する省庁名です。
-- "局・庁": 府省庁の下の組織名です。「観光庁」や「気象庁」などはこちらの列に含まれます。
-- "金額": 個別の契約の支出額（円）です。
-- "事業名": 実施された事業の正式名称です。
-- "支出先名": 支払いを受けた法人名です。
-# あなたのタスク
-ユーザーからの自然言語による質問を解釈し、その答えを導き出すための**DuckDBで実行可能なSQLクエリを1つだけ**生成してください。
-# 遵守すべきルール
-1. 生成するSQLは、上記のスキーマ情報と解説を正確に反映させてください。
-2. **SQL内の列名は、必ずダブルクォート `"` で囲んでください。**
-3. ユーザーの入力には表記揺れが含まれる可能性が非常に高いです。**`LIKE` 演算子を使った部分一致検索を積極的に使用してください。**
-   - **特に重要**: 「子ども家庭庁」と質問されても `WHERE "府省庁" LIKE '%こども家庭庁%'` のように、シンプルなひらがな表記で検索してください。
-4. **`SUM` や `COUNT` などの集計関数を使用する場合は、`AS` を使って結果の列に分かりやすい別名（例: `AS "合計金額"`、`AS "契約件数"`）を付けてください。**
-5. 回答には、SQLクエリ以外の説明、前置き、後書きを含めないでください。
-6. SQLクエリは、```sql ... ``` のようにマークダウンのコードブロックで囲んで出力してください。
-"""
-    full_prompt = f"{system_prompt}\n\n# ユーザーの質問\n{user_question}"
-    return full_prompt
-
-# --- Streamlit UI ---
-st.title("自然言語DB分析ツール 💬")
-st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
-
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-# 修正点3: 新しいキャッシュ関数を呼び出し、後続の処理にconnを渡す
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-conn = get_db_connection()
 schema_info = get_schema_info(conn)
-
 if schema_info is None:
     st.warning("データベーススキーマの取得に失敗しました。アプリのログを確認してください。")
     st.stop()
 
-# --- 以降、UI部分とその他の関数定義 ---
-# (その他の部分は変更なし。念のため完全なコードを記載)
-
+# (以降、残りのすべてのコードを記載)
 MINISTRIES = [
     'こども家庭庁', 'カジノ管理委員会', 'スポーツ庁', 'デジタル庁', '中央労働委員会',
     '個人情報保護委員会', '公安調査庁', '公害等調整委員会', '公正取引委員会', '内閣官房',
@@ -133,6 +88,41 @@ def generate_sample_questions(num_questions=5):
         template = random.choice(QUESTION_TEMPLATES)
         samples.append(template.format(ministry=ministry))
     return samples
+
+try: model = genai.GenerativeModel('gemini-1.5-flash')
+except Exception as e: st.error(f"Geminiモデルの読み込み中にエラーが発生しました: {e}"); st.stop()
+
+def create_prompt(user_question, schema_info):
+    system_prompt = f"""
+あなたは、日本の行政事業レビューデータを分析する優秀なSQLデータアナリストです。
+`{TABLE_NAME}` という名前のテーブルを持つDuckDBデータベースを操作する前提で、以下のタスクを実行してください。
+{schema_info}
+# 主要な列の解説
+- "府省庁": 事業を所管する省庁名です。
+- "局・庁": 府省庁の下の組織名です。「観光庁」や「気象庁」などはこちらの列に含まれます。
+- "金額": 個別の契約の支出額（円）です。
+- "事業名": 実施された事業の正式名称です。
+- "支出先名": 支払いを受けた法人名です。
+# あなたのタスク
+ユーザーからの自然言語による質問を解釈し、その答えを導き出すための**DuckDBで実行可能なSQLクエリを1つだけ**生成してください。
+# 遵守すべきルール
+1. 生成するSQLは、上記のスキーマ情報と解説を正確に反映させてください。
+2. **SQL内の列名は、必ずダブルクォート `"` で囲んでください。**
+3. ユーザーの入力には表記揺れが含まれる可能性が非常に高いです。**`LIKE` 演算子を使った部分一致検索を積極的に使用してください。**
+   - **特に重要**: 「子ども家庭庁」と質問されても `WHERE "府省庁" LIKE '%こども家庭庁%'` のように、シンプルなひらがな表記で検索してください。
+4. **`SUM` や `COUNT` などの集計関数を使用する場合は、`AS` を使って結果の列に分かりやすい別名（例: `AS "合計金額"`、`AS "契約件数"`）を付けてください。**
+5. 回答には、SQLクエリ以外の説明、前置き、後書きを含めないでください。
+6. SQLクエリは、```sql ... ``` のようにマークダウンのコードブロックで囲んで出力してください。
+"""
+    full_prompt = f"{system_prompt}\n\n# ユーザーの質問\n{user_question}"
+    return full_prompt
+
+def execute_sql(conn, sql_query):
+    try:
+        result_df = conn.execute(sql_query).fetchdf()
+        return result_df
+    except Exception as e:
+        st.error(f"SQLの実行中にエラーが発生しました: {e}"); st.error(f"実行しようとしたSQL: \n```sql\n{sql_query}\n```"); return None
 
 def format_japanese_currency(num):
     if not isinstance(num, (int, float, np.number)) or num == 0: return "0円"
@@ -175,7 +165,7 @@ if submitted and user_question:
         except Exception as e: st.error(f"SQLの生成中にエラーが発生しました: {e}"); st.stop()
 
     with st.spinner("データベースを検索中..."):
-        result_df = execute_sql(conn, generated_sql) # ★★★ connを渡すように変更 ★★★
+        result_df = execute_sql(conn, generated_sql)
 
     if result_df is not None:
         st.success("データの取得が完了しました！")
