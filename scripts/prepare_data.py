@@ -41,8 +41,10 @@ def prepare_database():
     try:
         with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
             with z.open(CSV_FILE_NAME) as f:
-                # 文字コードを 'cp932' (Shift_JIS) に指定して読み込む
-                df = pd.read_csv(f, encoding='cp932', low_memory=False)
+                # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                # 変更点: 文字コードを 'cp932' から 'utf-8-sig' に変更
+                # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                df = pd.read_csv(f, encoding='utf-8-sig', low_memory=False)
         print("CSVファイルの読み込みが完了しました。")
         print("データの一部:")
         print(df.head())
