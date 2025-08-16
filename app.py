@@ -6,17 +6,43 @@ from dotenv import load_dotenv
 import numpy as np
 import pandas as pd
 import random
+from scripts.prepare_data import prepare_database # ★★★ prepare_data.py から関数をインポート ★★★
 
 # --- 初期設定 ---
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
-if not api_key: st.error("エラー: Google APIキーが設定されていません。.envファイルを確認してください。"); st.stop()
+if not api_key: st.error("エラー: Google APIキーが設定されていません。StreamlitのSecretsに設定してください。"); st.stop()
 try: genai.configure(api_key=api_key)
 except Exception as e: st.error(f"APIキーの設定中にエラーが発生しました: {e}"); st.stop()
 DB_FILE = os.path.join("data", "review.db")
 TABLE_NAME = "main_data"
 
-# --- サンプル質問生成用のデータ ---
+# --- Streamlit UI ---
+st.title("自然言語DB分析ツール 💬")
+st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
+
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+# 修正点: データベースの存在をチェックし、なければ自動生成する
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+if not os.path.exists(DB_FILE):
+    st.info("初回起動のため、データベースを準備しています。これには数分かかる場合があります...")
+    # st.spinner を使って処理中であることを分かりやすく表示
+    with st.spinner('データをダウンロードし、データベースを構築中...'):
+        try:
+            prepare_database() # データベース生成関数を実行
+            st.success("データベースの準備が完了しました！ページを再読み込みしてください。")
+            # 準備完了後、一旦スクリプトを停止してユーザーにリロードを促す
+            st.stop()
+        except Exception as e:
+            st.error(f"データベースの準備中にエラーが発生しました: {e}")
+            st.stop()
+
+
+# --- 以降のコードは変更なし ---
+
+# (ここに以前のバージョンの `app.py` の残りのコードが続きます)
+# (念のため、以下に完全なコードを再掲します)
+
 MINISTRIES = [
     'こども家庭庁', 'カジノ管理委員会', 'スポーツ庁', 'デジタル庁', '中央労働委員会',
     '個人情報保護委員会', '公安調査庁', '公害等調整委員会', '公正取引委員会', '内閣官房',
@@ -24,7 +50,7 @@ MINISTRIES = [
     '国土交通省　海上保安庁', '国土交通省　観光庁', '国土交通省　運輸安全委員会',
     '国税庁', '外務省', '復興庁', '文化庁', '文部科学省', '林野庁', '水産庁',
     '法務省', '消費者庁', '消防庁', '特許庁', '環境省', '経済産業省', '総務省',
-    '警察庁', '財務省', '農林水産省', '金融庁', '防衛省'
+    '警察庁', '財務省', '農林usura', '金融庁', '防衛省'
 ]
 QUESTION_TEMPLATES = [
     "{ministry}の支出額の合計はいくらですか？",
@@ -43,7 +69,6 @@ def generate_sample_questions(num_questions=5):
         samples.append(template.format(ministry=ministry))
     return samples
 
-# --- LLMとプロンプトの設定 ---
 try: model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception as e: st.error(f"Geminiモデルの読み込み中にエラーが発生しました: {e}"); st.stop()
 
@@ -51,19 +76,15 @@ def create_prompt(user_question, schema_info):
     system_prompt = f"""
 あなたは、日本の行政事業レビューデータを分析する優秀なSQLデータアナリストです。
 `{TABLE_NAME}` という名前のテーブルを持つDuckDBデータベースを操作する前提で、以下のタスクを実行してください。
-
 {schema_info}
-
 # 主要な列の解説
 - "府省庁": 事業を所管する省庁名です。
 - "局・庁": 府省庁の下の組織名です。「観光庁」や「気象庁」などはこちらの列に含まれます。
 - "金額": 個別の契約の支出額（円）です。
 - "事業名": 実施された事業の正式名称です。
 - "支出先名": 支払いを受けた法人名です。
-
 # あなたのタスク
 ユーザーからの自然言語による質問を解釈し、その答えを導き出すための**DuckDBで実行可能なSQLクエリを1つだけ**生成してください。
-
 # 遵守すべきルール
 1. 生成するSQLは、上記のスキーマ情報と解説を正確に反映させてください。
 2. **SQL内の列名は、必ずダブルクォート `"` で囲んでください。**
@@ -73,11 +94,9 @@ def create_prompt(user_question, schema_info):
 5. 回答には、SQLクエリ以外の説明、前置き、後書きを含めないでください。
 6. SQLクエリは、```sql ... ``` のようにマークダウンのコードブロックで囲んで出力してください。
 """
-    
     full_prompt = f"{system_prompt}\n\n# ユーザーの質問\n{user_question}"
     return full_prompt
 
-# --- 関数の定義 ---
 def get_schema_info():
     if not os.path.exists(DB_FILE): return None
     try:
@@ -85,8 +104,7 @@ def get_schema_info():
         schema_df = conn.execute(f"DESCRIBE {TABLE_NAME};").fetchdf()
         conn.close()
         schema_str = "テーブルスキーマ:\n"
-        for _, row in schema_df.iterrows():
-            schema_str += f"- {row['column_name']} ({row['column_type']})\n"
+        for _, row in schema_df.iterrows(): schema_str += f"- {row['column_name']} ({row['column_type']})\n"
         return schema_str
     except Exception as e: st.error(f"データベースのスキーマ情報取得中にエラーが発生しました: {e}"); return None
 
@@ -97,9 +115,7 @@ def execute_sql(sql_query):
         conn.close()
         return result_df
     except Exception as e:
-        st.error(f"SQLの実行中にエラーが発生しました: {e}")
-        st.error(f"実行しようとしたSQL: \n```sql\n{sql_query}\n```")
-        return None
+        st.error(f"SQLの実行中にエラーが発生しました: {e}"); st.error(f"実行しようとしたSQL: \n```sql\n{sql_query}\n```"); return None
 
 def format_japanese_currency(num):
     if not isinstance(num, (int, float, np.number)) or num == 0: return "0円"
@@ -118,12 +134,11 @@ def format_japanese_currency(num):
         else: result += f"{remainder}円"
     return result + "円"
 
-# --- Streamlit UI ---
-st.title("自然言語DB分析ツール 💬")
-st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
-
 schema_info = get_schema_info()
-if schema_info is None: st.error(f"データベースファイル '{DB_FILE}' が見つかりません。"); st.warning("`scripts/prepare_data.py` を実行して、データベースを準備してください。"); st.stop()
+if schema_info is None:
+    st.error(f"データベースファイル '{DB_FILE}' が見つかりません。")
+    st.warning("`scripts/prepare_data.py` を実行して、データベースを準備してください。")
+    st.stop()
 
 st.markdown("""<style>div[data-testid="stButton"] > button {text-align: left !important; width: 100%; justify-content: flex-start !important;}</style>""", unsafe_allow_html=True)
 
@@ -153,31 +168,20 @@ if submitted and user_question:
 
     if result_df is not None:
         st.success("データの取得が完了しました！")
-        
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        # 修正点: 単一数値の結果表示ロジックを、文脈を判断するように強化
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
         if result_df.shape == (1, 1) and pd.api.types.is_numeric_dtype(result_df.iloc[0,0]):
             value = result_df.iloc[0, 0]
             label = result_df.columns[0]
-            
-            # 該当データなし(NaN)の場合の処理
             if pd.isna(value):
                 st.metric(label=label, value="―", delta="該当するデータがありませんでした", delta_color="inverse")
             else:
-                # 文脈判断: '金額' という文字が含まれていれば通貨、そうでなければ件数として扱う
                 is_monetary = '金額' in generated_sql or '金額' in label
-
                 if is_monetary:
-                    # 通貨の場合の表示
                     formatted_comma_value = f"{int(value):,} 円"
                     formatted_japanese_value = format_japanese_currency(value)
                     st.metric(label=label, value=formatted_comma_value, delta=formatted_japanese_value, delta_color="off")
                 else:
-                    # 件数などの場合の表示
                     formatted_value = f"{int(value):,} 件"
                     st.metric(label=label, value=formatted_value)
         else:
-            # 表形式の結果表示
             st.write(f"**分析結果:** {len(result_df)} 件")
             st.dataframe(result_df.style.format(precision=0, thousands=","))
