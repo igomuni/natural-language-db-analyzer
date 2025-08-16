@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 import numpy as np
 import pandas as pd
 import random
-from scripts.prepare_data import prepare_database # ★★★ prepare_data.py から関数をインポート ★★★
+from scripts.prepare_data import prepare_database # scriptsフォルダから関数をインポート
 
 # --- 初期設定 ---
 load_dotenv()
@@ -17,32 +17,40 @@ except Exception as e: st.error(f"APIキーの設定中にエラーが発生し�
 DB_FILE = os.path.join("data", "review.db")
 TABLE_NAME = "main_data"
 
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+# 修正点1: データベースの準備をキャッシュされる関数にまとめる
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+@st.cache_resource
+def initialize_database():
+    """
+    データベースの存在をチェックし、なければ自動生成する。
+    この関数は @st.cache_resource により、初回実行時のみ動作する。
+    """
+    if not os.path.exists(DB_FILE):
+        # st.infoは一時的なメッセージなので、永続的なメッセージにはst.textやst.markdownを使う
+        # ここでは、スピナーがその役割を果たす
+        with st.spinner('初回起動のため、データをダウンロードしデータベースを構築しています...（数分かかります）'):
+            try:
+                prepare_database()
+            except Exception as e:
+                # エラーが発生した場合、アプリを停止してエラーメッセージを表示
+                st.error(f"データベースの準備中に致命的なエラーが発生しました: {e}")
+                st.stop()
+    return True
+
+
 # --- Streamlit UI ---
 st.title("自然言語DB分析ツール 💬")
 st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
 
 # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-# 修正点: データベースの存在をチェックし、なければ自動生成する
+# 修正点2: 新しい初期化関数を呼び出す
 # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-if not os.path.exists(DB_FILE):
-    st.info("初回起動のため、データベースを準備しています。これには数分かかる場合があります...")
-    # st.spinner を使って処理中であることを分かりやすく表示
-    with st.spinner('データをダウンロードし、データベースを構築中...'):
-        try:
-            prepare_database() # データベース生成関数を実行
-            st.success("データベースの準備が完了しました！ページを再読み込みしてください。")
-            # 準備完了後、一旦スクリプトを停止してユーザーにリロードを促す
-            st.stop()
-        except Exception as e:
-            st.error(f"データベースの準備中にエラーが発生しました: {e}")
-            st.stop()
-
+initialize_database()
 
 # --- 以降のコードは変更なし ---
 
-# (ここに以前のバージョンの `app.py` の残りのコードが続きます)
 # (念のため、以下に完全なコードを再掲します)
-
 MINISTRIES = [
     'こども家庭庁', 'カジノ管理委員会', 'スポーツ庁', 'デジタル庁', '中央労働委員会',
     '個人情報保護委員会', '公安調査庁', '公害等調整委員会', '公正取引委員会', '内閣官房',
@@ -50,7 +58,7 @@ MINISTRIES = [
     '国土交通省　海上保安庁', '国土交通省　観光庁', '国土交通省　運輸安全委員会',
     '国税庁', '外務省', '復興庁', '文化庁', '文部科学省', '林野庁', '水産庁',
     '法務省', '消費者庁', '消防庁', '特許庁', '環境省', '経済産業省', '総務省',
-    '警察庁', '財務省', '農林usura', '金融庁', '防衛省'
+    '警察庁', '財務省', '農林水産省', '金融庁', '防衛省'
 ]
 QUESTION_TEMPLATES = [
     "{ministry}の支出額の合計はいくらですか？",
@@ -136,8 +144,7 @@ def format_japanese_currency(num):
 
 schema_info = get_schema_info()
 if schema_info is None:
-    st.error(f"データベースファイル '{DB_FILE}' が見つかりません。")
-    st.warning("`scripts/prepare_data.py` を実行して、データベースを準備してください。")
+    st.warning("データベースの準備が完了していません。ページを再読み込みしてください。")
     st.stop()
 
 st.markdown("""<style>div[data-testid="stButton"] > button {text-align: left !important; width: 100%; justify-content: flex-start !important;}</style>""", unsafe_allow_html=True)
