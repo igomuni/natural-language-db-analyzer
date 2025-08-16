@@ -16,19 +16,20 @@ except Exception as e: st.error(f"APIキーの設定中にエラーが発生し�
 DB_FILE = os.path.join("data", "review.db")
 TABLE_NAME = "main_data"
 
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+# 修正点: データベース接続をキャッシュするだけの最終・シンプル版
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 @st.cache_resource
 def get_db_connection():
     """
     リポジトリに含まれるDBファイルへの接続を確立し、キャッシュする。
     """
     if not os.path.exists(DB_FILE):
-        st.error(f"データベースファイル '{DB_FILE}' が見つかりません。リポジトリに含まれているか確認してください。")
+        st.error(f"データベースファイル '{DB_FILE}' が見つかりません。リポジトリにコミットされているか確認してください。")
         st.stop()
     
     try:
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        # 修正点: read_only=True を削除し、接続設定の競合を完全に回避する
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        # 競合を避けるため、デフォルトの読み書きモードで接続します
         conn = duckdb.connect(DB_FILE)
         return conn
     except Exception as e:
