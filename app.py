@@ -10,15 +10,9 @@ import random
 # --- 初期設定 ---
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
-if not api_key:
-    st.error("エラー: Google APIキーが設定されていません。.envファイルを確認してください。")
-    st.stop()
-try:
-    genai.configure(api_key=api_key)
-except Exception as e:
-    st.error(f"APIキーの設定中にエラーが発生しました: {e}")
-    st.stop()
-
+if not api_key: st.error("エラー: Google APIキーが設定されていません。.envファイルを確認してください。"); st.stop()
+try: genai.configure(api_key=api_key)
+except Exception as e: st.error(f"APIキーの設定中にエラーが発生しました: {e}"); st.stop()
 DB_FILE = os.path.join("data", "review.db")
 TABLE_NAME = "main_data"
 
@@ -50,11 +44,8 @@ def generate_sample_questions(num_questions=5):
     return samples
 
 # --- LLMとプロンプトの設定 ---
-try:
-    model = genai.GenerativeModel('gemini-1.5-flash')
-except Exception as e:
-    st.error(f"Geminiモデルの読み込み中にエラーが発生しました: {e}")
-    st.stop()
+try: model = genai.GenerativeModel('gemini-1.5-flash')
+except Exception as e: st.error(f"Geminiモデルの読み込み中にエラーが発生しました: {e}"); st.stop()
 
 def create_prompt(user_question, schema_info):
     system_prompt = f"""
@@ -64,9 +55,9 @@ def create_prompt(user_question, schema_info):
 {schema_info}
 
 # 主要な列の解説
-- "府省庁": 事業を所管する省庁名です。ユーザーが「〇〇省の〜」「〇〇庁が〜」と言及した場合は、この列を `WHERE` 句で使ってください。
+- "府省庁": 事業を所管する省庁名です。
 - "局・庁": 府省庁の下の組織名です。「観光庁」や「気象庁」などはこちらの列に含まれます。
-- "金額": 個別の契約の支出額（円）です。ユーザーが「支出額」「費用」「コスト」「予算」について尋ねた場合は、この列を `SUM()` や `AVG()` などの集計対象としてください。
+- "金額": 個別の契約の支出額（円）です。
 - "事業名": 実施された事業の正式名称です。
 - "支出先名": 支払いを受けた法人名です。
 
@@ -76,10 +67,11 @@ def create_prompt(user_question, schema_info):
 # 遵守すべきルール
 1. 生成するSQLは、上記のスキーマ情報と解説を正確に反映させてください。
 2. **SQL内の列名は、必ずダブルクォート `"` で囲んでください。**
-3. ユーザーの入力には表記揺れが含まれる可能性が非常に高いです。**完全一致(`=`)ではなく、`LIKE` 演算子を使った部分一致検索を積極的に使用してください。**
-   - **特に重要**: ユーザーが「子ども家庭庁」や「子供家庭庁」と入力した場合でも、データベース内の正式名称は「こども家庭庁」である可能性が高いです。このような場合は `WHERE "府省庁" LIKE '%こども家庭庁%'` のように、最も一般的でシンプルなひらがな表記を使って検索するクエリを生成してください。
-4. 回答には、SQLクエリ以外の説明、前置き、後書きを含めないでください。
-5. SQLクエリは、```sql ... ``` のようにマークダウンのコードブロックで囲んで出力してください。
+3. ユーザーの入力には表記揺れが含まれる可能性が非常に高いです。**`LIKE` 演算子を使った部分一致検索を積極的に使用してください。**
+   - **特に重要**: 「子ども家庭庁」と質問されても `WHERE "府省庁" LIKE '%こども家庭庁%'` のように、シンプルなひらがな表記で検索してください。
+4. **`SUM` や `COUNT` などの集計関数を使用する場合は、`AS` を使って結果の列に分かりやすい別名（例: `AS "合計金額"`、`AS "契約件数"`）を付けてください。**
+5. 回答には、SQLクエリ以外の説明、前置き、後書きを含めないでください。
+6. SQLクエリは、```sql ... ``` のようにマークダウンのコードブロックで囲んで出力してください。
 """
     
     full_prompt = f"{system_prompt}\n\n# ユーザーの質問\n{user_question}"
@@ -96,9 +88,7 @@ def get_schema_info():
         for _, row in schema_df.iterrows():
             schema_str += f"- {row['column_name']} ({row['column_type']})\n"
         return schema_str
-    except Exception as e:
-        st.error(f"データベースのスキーマ情報取得中にエラーが発生しました: {e}")
-        return None
+    except Exception as e: st.error(f"データベースのスキーマ情報取得中にエラーが発生しました: {e}"); return None
 
 def execute_sql(sql_query):
     try:
@@ -133,34 +123,19 @@ st.title("自然言語DB分析ツール 💬")
 st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
 
 schema_info = get_schema_info()
-if schema_info is None:
-    st.error(f"データベースファイル '{DB_FILE}' が見つかりません。")
-    st.warning("`scripts/prepare_data.py` を実行して、データベースを準備してください。")
-    st.stop()
+if schema_info is None: st.error(f"データベースファイル '{DB_FILE}' が見つかりません。"); st.warning("`scripts/prepare_data.py` を実行して、データベースを準備してください。"); st.stop()
 
-st.markdown("""
-<style>
-    div[data-testid="stButton"] > button {
-        text-align: left !important;
-        width: 100%;
-        justify-content: flex-start !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+st.markdown("""<style>div[data-testid="stButton"] > button {text-align: left !important; width: 100%; justify-content: flex-start !important;}</style>""", unsafe_allow_html=True)
 
-def set_question_text(question):
-    st.session_state.user_question_input = question
+def set_question_text(question): st.session_state.user_question_input = question
 
 with st.expander("質問のヒント (クリックして表示)"):
     st.info("以下のような質問ができます。クリックすると入力欄にコピーされます。")
     sample_questions = generate_sample_questions(5)
-    for q in sample_questions:
-        st.button(q, on_click=set_question_text, args=(q,), key=f"btn_{q}")
+    for q in sample_questions: st.button(q, on_click=set_question_text, args=(q,), key=f"btn_{q}")
 
 with st.form("question_form"):
-    user_question = st.text_area("分析したいことを日本語で入力してください:", 
-                                 key="user_question_input",
-                                 placeholder="例: こども家庭庁による支出を、金額が大きい順に5件教えて。")
+    user_question = st.text_area("分析したいことを日本語で入力してください:", key="user_question_input", placeholder="例: こども家庭庁による支出を、金額が大きい順に5件教えて。")
     submitted = st.form_submit_button("質問する")
 
 if submitted and user_question:
@@ -170,11 +145,8 @@ if submitted and user_question:
             response = model.generate_content(prompt)
             generated_sql = response.text.strip().replace("```sql", "").replace("```", "").strip()
             st.success("SQLの生成が完了しました！")
-            with st.expander("AIによって生成されたSQLクエリ"):
-                st.code(generated_sql, language="sql")
-        except Exception as e:
-            st.error(f"SQLの生成中にエラーが発生しました: {e}")
-            st.stop()
+            with st.expander("AIによって生成されたSQLクエリ"): st.code(generated_sql, language="sql")
+        except Exception as e: st.error(f"SQLの生成中にエラーが発生しました: {e}"); st.stop()
 
     with st.spinner("データベースを検索中..."):
         result_df = execute_sql(generated_sql)
@@ -183,19 +155,29 @@ if submitted and user_question:
         st.success("データの取得が完了しました！")
         
         # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        # 修正点: 結果がNaN（データなし）の場合の処理を追加
+        # 修正点: 単一数値の結果表示ロジックを、文脈を判断するように強化
         # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
         if result_df.shape == (1, 1) and pd.api.types.is_numeric_dtype(result_df.iloc[0,0]):
             value = result_df.iloc[0, 0]
             label = result_df.columns[0]
             
-            # valueがNaNかどうかをチェック
+            # 該当データなし(NaN)の場合の処理
             if pd.isna(value):
-                st.metric(label=label, value="0 円", delta="該当するデータがありませんでした", delta_color="inverse")
+                st.metric(label=label, value="―", delta="該当するデータがありませんでした", delta_color="inverse")
             else:
-                formatted_comma_value = f"{int(value):,} 円"
-                formatted_japanese_value = format_japanese_currency(value)
-                st.metric(label=label, value=formatted_comma_value, delta=formatted_japanese_value, delta_color="off")
+                # 文脈判断: '金額' という文字が含まれていれば通貨、そうでなければ件数として扱う
+                is_monetary = '金額' in generated_sql or '金額' in label
+
+                if is_monetary:
+                    # 通貨の場合の表示
+                    formatted_comma_value = f"{int(value):,} 円"
+                    formatted_japanese_value = format_japanese_currency(value)
+                    st.metric(label=label, value=formatted_comma_value, delta=formatted_japanese_value, delta_color="off")
+                else:
+                    # 件数などの場合の表示
+                    formatted_value = f"{int(value):,} 件"
+                    st.metric(label=label, value=formatted_value)
         else:
+            # 表形式の結果表示
             st.write(f"**分析結果:** {len(result_df)} 件")
             st.dataframe(result_df.style.format(precision=0, thousands=","))
