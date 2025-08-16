@@ -14,7 +14,8 @@ venv.bak/
 .env
 
 # Database files
-*.db
+# 自動でcsvをとってこようとしたが、自動ボット拒否される機構があったため、素直にdbをGitに持つことにした
+# *.db 
 *.sqlite3
 
 # Streamlit
