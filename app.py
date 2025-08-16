@@ -3,60 +3,60 @@ import streamlit as st
 import duckdb
 import google.generativeai as genai
 from dotenv import load_dotenv
-import numpy as np # numpyをインポート
-import pandas as pd # pandasをインポート
+import numpy as np
+import pandas as pd
+import random
 
 # --- 初期設定 ---
-
-# .envファイルから環境変数を読み込む
 load_dotenv()
-
-# Google Gemini APIキーの設定
 api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:
     st.error("エラー: Google APIキーが設定されていません。.envファイルを確認してください。")
     st.stop()
-
 try:
     genai.configure(api_key=api_key)
 except Exception as e:
     st.error(f"APIキーの設定中にエラーが発生しました: {e}")
     st.stop()
 
-
-# データベースファイルのパス
 DB_FILE = os.path.join("data", "review.db")
 TABLE_NAME = "main_data"
 
-# --- LLMとプロンプトの設定 ---
+# --- サンプル質問生成用のデータ ---
+MINISTRIES = [
+    'こども家庭庁', 'カジノ管理委員会', 'スポーツ庁', 'デジタル庁', '中央労働委員会',
+    '個人情報保護委員会', '公安調査庁', '公害等調整委員会', '公正取引委員会', '内閣官房',
+    '内閣府', '厚生労働省', '原子力規制委員会', '国土交通省', '国土交通省　気象庁',
+    '国土交通省　海上保安庁', '国土交通省　観光庁', '国土交通省　運輸安全委員会',
+    '国税庁', '外務省', '復興庁', '文化庁', '文部科学省', '林野庁', '水産庁',
+    '法務省', '消費者庁', '消防庁', '特許庁', '環境省', '経済産業省', '総務省',
+    '警察庁', '財務省', '農林水産省', '金融庁', '防衛省'
+]
+QUESTION_TEMPLATES = [
+    "{ministry}の支出額の合計はいくらですか？",
+    "{ministry}が最も多く支出している事業名トップ3を教えてください。",
+    "{ministry}への支出で、契約相手が多い法人名を5つリストアップしてください。",
+    "{ministry}関連の事業で、入札者数が1だった契約の件数を教えて。",
+    "{ministry}による支出を、金額が大きい順に5件、事業名と支出先名、金額を教えて。",
+    "支出額が10億円を超えている契約のうち、{ministry}が関わっているものをリストアップして。",
+]
 
-# Geminiモデルの初期化
+def generate_sample_questions(num_questions=5):
+    samples = []
+    for _ in range(num_questions):
+        ministry = random.choice(MINISTRIES)
+        template = random.choice(QUESTION_TEMPLATES)
+        samples.append(template.format(ministry=ministry))
+    return samples
+
+# --- LLMとプロンプトの設定 ---
 try:
     model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception as e:
     st.error(f"Geminiモデルの読み込み中にエラーが発生しました: {e}")
     st.stop()
 
-
-def get_schema_info():
-    """データベースからスキーマ情報を取得する"""
-    if not os.path.exists(DB_FILE):
-        return None
-    try:
-        conn = duckdb.connect(DB_FILE)
-        schema_df = conn.execute(f"DESCRIBE {TABLE_NAME};").fetchdf()
-        conn.close()
-        # プロンプト用にスキーマ情報を整形
-        schema_str = "テーブルスキーマ:\n"
-        for _, row in schema_df.iterrows():
-            schema_str += f"- {row['column_name']} ({row['column_type']})\n"
-        return schema_str
-    except Exception as e:
-        st.error(f"データベースのスキーマ情報取得中にエラーが発生しました: {e}")
-        return None
-
 def create_prompt(user_question, schema_info):
-    """LLMに投げるためのプロンプトを生成する"""
     system_prompt = f"""
 あなたは、日本の行政事業レビューデータを分析する優秀なSQLデータアナリストです。
 `{TABLE_NAME}` という名前のテーブルを持つDuckDBデータベースを操作する前提で、以下のタスクを実行してください。
@@ -65,6 +65,7 @@ def create_prompt(user_question, schema_info):
 
 # 主要な列の解説
 - "府省庁": 事業を所管する省庁名です。ユーザーが「〇〇省の〜」「〇〇庁が〜」と言及した場合は、この列を `WHERE` 句で使ってください。
+- "局・庁": 府省庁の下の組織名です。「観光庁」や「気象庁」などはこちらの列に含まれます。
 - "金額": 個別の契約の支出額（円）です。ユーザーが「支出額」「費用」「コスト」「予算」について尋ねた場合は、この列を `SUM()` や `AVG()` などの集計対象としてください。
 - "事業名": 実施された事業の正式名称です。
 - "支出先名": 支払いを受けた法人名です。
@@ -84,8 +85,22 @@ def create_prompt(user_question, schema_info):
     full_prompt = f"{system_prompt}\n\n# ユーザーの質問\n{user_question}"
     return full_prompt
 
+# --- 関数の定義 ---
+def get_schema_info():
+    if not os.path.exists(DB_FILE): return None
+    try:
+        conn = duckdb.connect(DB_FILE)
+        schema_df = conn.execute(f"DESCRIBE {TABLE_NAME};").fetchdf()
+        conn.close()
+        schema_str = "テーブルスキーマ:\n"
+        for _, row in schema_df.iterrows():
+            schema_str += f"- {row['column_name']} ({row['column_type']})\n"
+        return schema_str
+    except Exception as e:
+        st.error(f"データベースのスキーマ情報取得中にエラーが発生しました: {e}")
+        return None
+
 def execute_sql(sql_query):
-    """DuckDBでSQLクエリを実行し、結果をDataFrameで返す"""
     try:
         conn = duckdb.connect(DB_FILE)
         result_df = conn.execute(sql_query).fetchdf()
@@ -96,59 +111,55 @@ def execute_sql(sql_query):
         st.error(f"実行しようとしたSQL: \n```sql\n{sql_query}\n```")
         return None
 
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-# 新機能: 数値を日本語の通貨単位（兆・億・万）に変換する関数
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 def format_japanese_currency(num):
-    """数値を「X兆Y億Z万円」の形式にフォーマットする"""
-    if not isinstance(num, (int, float, np.number)) or num == 0:
-        return "0円"
-    
+    if not isinstance(num, (int, float, np.number)) or num == 0: return "0円"
     num = int(num)
-    
-    units = {
-        '兆': 10**12,
-        '億': 10**8,
-        '万': 10**4,
-    }
-    
-    if num < 10000:
-        return f"{num:,}円"
-
+    units = {'兆': 10**12, '億': 10**8, '万': 10**4}
+    if num < 10000: return f"{num:,}円"
     result = ""
     remainder = num
-    
     for unit, value in units.items():
         if remainder >= value:
             quotient = int(remainder // value)
             result += f"{quotient}{unit}"
             remainder %= value
-            
     if remainder > 0:
-        # 兆や億の下に万円以下の端数がある場合
-        if num >= 10000 and result != "":
-             pass # 例: 1兆1円のような表示は複雑なので、大きな単位を優先
-        else:
-             result += f"{remainder}円"
-
+        if num >= 10000 and result != "": pass
+        else: result += f"{remainder}円"
     return result + "円"
 
-
 # --- Streamlit UI ---
-
 st.title("自然言語DB分析ツール 💬")
 st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
 
-# データベースの存在チェック
 schema_info = get_schema_info()
 if schema_info is None:
     st.error(f"データベースファイル '{DB_FILE}' が見つかりません。")
     st.warning("`scripts/prepare_data.py` を実行して、データベースを準備してください。")
     st.stop()
 
-# 質問の入力フォーム
+st.markdown("""
+<style>
+    div[data-testid="stButton"] > button {
+        text-align: left !important;
+        width: 100%;
+        justify-content: flex-start !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+def set_question_text(question):
+    st.session_state.user_question_input = question
+
+with st.expander("質問のヒント (クリックして表示)"):
+    st.info("以下のような質問ができます。クリックすると入力欄にコピーされます。")
+    sample_questions = generate_sample_questions(5)
+    for q in sample_questions:
+        st.button(q, on_click=set_question_text, args=(q,), key=f"btn_{q}")
+
 with st.form("question_form"):
     user_question = st.text_area("分析したいことを日本語で入力してください:", 
+                                 key="user_question_input",
                                  placeholder="例: こども家庭庁による支出を、金額が大きい順に5件教えて。")
     submitted = st.form_submit_button("質問する")
 
@@ -159,7 +170,6 @@ if submitted and user_question:
             response = model.generate_content(prompt)
             generated_sql = response.text.strip().replace("```sql", "").replace("```", "").strip()
             st.success("SQLの生成が完了しました！")
-            
             with st.expander("AIによって生成されたSQLクエリ"):
                 st.code(generated_sql, language="sql")
         except Exception as e:
@@ -171,24 +181,21 @@ if submitted and user_question:
 
     if result_df is not None:
         st.success("データの取得が完了しました！")
-
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        # 新機能: 結果の表示方法を、件数に応じて変更
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
         
-        # ケース1: 結果が単一の数値の場合 (例: 合計金額)
+        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        # 修正点: 結果がNaN（データなし）の場合の処理を追加
+        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
         if result_df.shape == (1, 1) and pd.api.types.is_numeric_dtype(result_df.iloc[0,0]):
             value = result_df.iloc[0, 0]
             label = result_df.columns[0]
             
-            # カンマ区切りと日本語単位の両方を表示
-            formatted_comma_value = f"{int(value):,} 円"
-            formatted_japanese_value = format_japanese_currency(value)
-            
-            st.metric(label=label, value=formatted_comma_value, delta=formatted_japanese_value, delta_color="off")
-
-        # ケース2: 結果が表形式の場合
+            # valueがNaNかどうかをチェック
+            if pd.isna(value):
+                st.metric(label=label, value="0 円", delta="該当するデータがありませんでした", delta_color="inverse")
+            else:
+                formatted_comma_value = f"{int(value):,} 円"
+                formatted_japanese_value = format_japanese_currency(value)
+                st.metric(label=label, value=formatted_comma_value, delta=formatted_japanese_value, delta_color="off")
         else:
             st.write(f"**分析結果:** {len(result_df)} 件")
-            # DataFrameの数値列にカンマ区切りを適用して表示
             st.dataframe(result_df.style.format(precision=0, thousands=","))
