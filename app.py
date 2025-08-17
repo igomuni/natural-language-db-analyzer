@@ -8,7 +8,6 @@ import time
 import google.generativeai as genai
 from google.api_core import exceptions
 from dotenv import load_dotenv 
-import psycopg2
 
 # --- 初期設定 ---
 load_dotenv()
@@ -17,48 +16,59 @@ if not api_key: st.error("エラー: Google APIキーが設定されていませ
 try: genai.configure(api_key=api_key)
 except Exception as e: st.error(f"APIキーの設定中にエラーが発生しました: {e}"); st.stop()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL: st.error("エラー: DATABASE_URLが設定されていません。"); st.stop()
+# バックエンドは、シンプルな「Secure SQL Runner」であると想定
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 TABLE_NAME = "main_data"
 
-# --- データベース関連のコア関数 ---
-@st.cache_resource
-def get_db_connection():
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
-    except Exception as e:
-        st.error(f"データベースへの接続に失敗しました: {e}")
-        st.stop()
-
-conn = get_db_connection()
-
+# --- データベース/バックエンド関連 ---
 @st.cache_data(ttl=3600)
-def get_schema_info(_conn):
+def get_schema_from_backend(max_retries=2, delay=3):
+    sql_to_get_schema = "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'main_data';"
+    api_endpoint = f"{BACKEND_URL}/execute-sql"
+    payload = {"sql_query": sql_to_get_schema}
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(api_endpoint, json=payload, timeout=60)
+            response.raise_for_status()
+            schema_raw = response.json().get("result", [])
+            
+            schema_str = "テーブルスキーマ:\n"
+            for item in schema_raw:
+                schema_str += f"- {item['column_name']} ({item['data_type']})\n"
+            return schema_str
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404 and attempt < max_retries - 1:
+                st.warning(f"バックエンドが準備中のようです。再試行します... ({attempt + 1}/{max_retries-1})")
+                time.sleep(delay)
+                continue
+            else:
+                st.error(f"バックエンドからスキーマ情報の取得に失敗しました (HTTP Error): {e}")
+                st.error(f"Response Body: {e.response.text}")
+                return None
+        except Exception as e:
+            st.error(f"バックエンドからスキーマ情報の取得中に予期せぬエラーが発生しました: {e}")
+            return None
+    return None
+
+def execute_sql_on_backend(sql_query: str):
+    api_endpoint = f"{BACKEND_URL}/execute-sql"
+    payload = {"sql_query": sql_query}
     try:
-        with _conn.cursor() as cur:
-            cur.execute(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{TABLE_NAME}';")
-            schema_raw = cur.fetchall()
-        schema_str = "テーブルスキーマ:\n"
-        for item in schema_raw:
-            schema_str += f"- {item[0]} ({item[1]})\n"
-        return schema_str
-    except Exception as e:
-        st.error(f"データベースのスキーマ情報取得中にエラーが発生しました: {e}")
+        response = requests.post(api_endpoint, json=payload, timeout=60)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"バックエンドサーバーへの接続に失敗しました: {e}")
         return None
 
-def execute_sql(_conn, sql_query: str):
-    try:
-        result_df = pd.read_sql_query(sql_query, _conn)
-        return result_df
-    except Exception as e:
-        st.error(f"SQLの実行に失敗しました: {e}")
-        return None
-
-# --- LLMロジック ---
+# --- LLMロジック (フロントエンドに配置) ---
 try: model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception as e: st.error(f"Geminiモデルの読み込み中にエラーが発生しました: {e}"); st.stop()
 
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+# 修正点: 抜け落ちていたこの関数を、呼び出される前に定義する
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 def create_prompt_for_llm(user_question, schema_info):
     system_prompt = f"""
 あなたは、PostgreSQLデータベースを操作する優秀なSQLデータアナリストです。
@@ -106,8 +116,10 @@ st.set_page_config(layout="wide")
 st.title("自然言語DB分析ツール 💬")
 st.caption("行政事業レビューデータを元に、自然言語またはSQLで直接分析できます。")
 
-db_schema_info = get_schema_info(conn)
-if not db_schema_info: st.error("データベーススキーマの取得に失敗しました。アプリケーションを再起動してみてください。"); st.stop()
+db_schema_info = get_schema_from_backend()
+if not db_schema_info:
+    st.error("データベーススキーマの取得に失敗しました。アプリケーションを再起動してみてください。")
+    st.stop()
 
 tab1, tab2, tab3 = st.tabs(["**自然言語で分析 (AI)**", "**SQLを直接実行**", "**他のLLM用プロンプト**"])
 
@@ -125,63 +137,58 @@ with tab1:
 
     if submitted_q and user_question:
         generated_sql = ""
-        result_df = None
-        error_message = None
-        
         with st.spinner("AIがSQLを生成中..."):
             prompt = create_prompt_for_llm(user_question, db_schema_info)
             try:
                 response = model.generate_content(prompt)
                 generated_sql = response.text.strip().replace("```sql", "").replace("```", "").strip()
+                st.success("SQLの生成が完了しました！")
             except exceptions.ResourceExhausted as e:
-                error_message = {
-                    "title": "AIへのリクエストが無料利用枠の上限に達しました。",
-                    "body": "これはアプリの仕様です。開発者の方は、Google Cloudで請求先アカウントを有効にすることで、この制限を緩和できます。"
-                }
+                st.error("AIへのリクエストが無料利用枠の上限に達しました。"); st.info("これはアプリの仕様です。"); st.stop()
             except Exception as e:
-                error_message = {"title": f"SQLの生成中に予期せぬエラーが発生しました: {e}", "body": None}
-
-        if not error_message and generated_sql:
-            st.success("SQLの生成が完了しました！")
-            with st.spinner("データベースでSQLを実行中..."):
-                result_df = execute_sql(conn, generated_sql)
+                st.error(f"SQLの生成中に予期せぬエラーが発生しました: {e}"); st.stop()
         
-        st.subheader("分析結果")
-        if error_message:
-            st.error(error_message["title"])
-            if error_message["body"]:
-                st.info(error_message["body"])
-        elif result_df is not None:
-            with st.expander("AIによって生成されたSQLクエリ"): st.code(generated_sql, language="sql")
-            if result_df.empty: st.warning("分析結果が0件でした。")
+        with st.spinner("バックエンドサーバーでSQLを実行中..."):
+            api_response = execute_sql_on_backend(generated_sql)
+
+        if api_response:
+            st.success("データの取得が完了しました！")
+            with st.expander("AIによって生成され、バックエンドで実行されたSQLクエリ"): st.code(generated_sql, language="sql")
+            result_data = api_response.get("result", []); result_df = pd.DataFrame(result_data)
+            if result_df.empty:
+                st.warning("分析結果が0件でした。")
             elif result_df.shape == (1, 1) and pd.api.types.is_numeric_dtype(result_df.iloc[0,0]):
                 value = result_df.iloc[0, 0]; label = result_df.columns[0]
-                if pd.isna(value): st.metric(label=label, value="―", delta="該当なし", delta_color="inverse")
+                if pd.isna(value):
+                    st.metric(label=label, value="―", delta="該当なし", delta_color="inverse")
                 else:
                     is_monetary = '金額' in label or '額' in label
-                    if is_monetary: st.metric(label=label, value=f"{int(value):,} 円", delta=format_japanese_currency(value), delta_color="off")
-                    else: st.metric(label=label, value=f"{int(value):,} 件")
+                    if is_monetary:
+                        st.metric(label=label, value=f"{int(value):,} 円", delta=format_japanese_currency(value), delta_color="off")
+                    else:
+                        st.metric(label=label, value=f"{int(value):,} 件")
             else:
                 st.write(f"**分析結果:** {len(result_df)} 件"); st.dataframe(result_df.style.format(precision=0, thousands=","))
-        elif submitted_q:
-            st.warning("処理中にエラーが発生しました。詳細は上記のメッセージをご確認ください。")
 
 with tab2:
     st.header("SQLを直接実行して分析する")
     def set_sql_text(sql): st.session_state.sql_input = sql
     with st.expander("サンプルSQL (クリックして表示)"):
         st.info("以下のようなSQLクエリを試せます。クリックすると入力欄にコピーされます。")
-        for desc, sql in SAMPLE_SQLS.items(): st.button(desc, on_click=set_sql_text, args=(sql,), key=f"btn_sql_{desc}")
+        for desc, sql in SAMPLE_SQLS.items():
+            st.button(desc, on_click=set_sql_text, args=(sql,), key=f"btn_sql_{desc}")
     with st.form("sql_form"):
         sql_query_input = st.text_area("実行するSELECT文を入力してください:", height=200, key="sql_input", placeholder='SELECT * FROM "main_data" LIMIT 5;')
         submitted_sql = st.form_submit_button("SQLを実行")
     if submitted_sql and sql_query_input:
-        st.subheader("実行結果")
-        with st.spinner("データベースでSQLを実行中..."):
-            result_df = execute_sql(conn, sql_query_input)
-        if result_df is not None:
+        with st.spinner("バックエンドサーバーでSQLを実行中..."):
+            api_response = execute_sql_on_backend(sql_query_input)
+        if api_response:
             st.success("データの取得が完了しました！")
-            st.write(f"**実行結果:** {len(result_df)} 件"); st.dataframe(result_df.style.format(precision=0, thousands=","))
+            result_data = api_response.get("result", [])
+            result_df = pd.DataFrame(result_data)
+            st.write(f"**実行結果:** {len(result_df)} 件")
+            st.dataframe(result_df.style.format(precision=0, thousands=","))
 
 with tab3:
     st.header("他のLLMで試すためのプロンプトを生成")
