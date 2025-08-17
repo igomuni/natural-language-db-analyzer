@@ -2,3 +2,5 @@ streamlit
 pandas
 numpy
 requests
+google-generativeai # ADD THIS BACK
+python-dotenv       # Add for local testing

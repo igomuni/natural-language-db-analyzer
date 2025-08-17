@@ -4,51 +4,102 @@ import pandas as pd
 import numpy as np
 import requests 
 import random
-import time # ★★★ リトライの待ち時間のためにtimeライブラリをインポート ★★★
+import time
+import google.generativeai as genai # AIライブラリをフロントエンドに再インポート
+from dotenv import load_dotenv # ローカルテスト用にdotenvを追加
 
 # --- 初期設定 ---
+load_dotenv() # ローカルの.envを読み込む
+# Streamlit CloudではSecretsから、ローカルでは.envからAPIキーを取得
+api_key = os.getenv("GOOGLE_API_KEY") 
+if not api_key: st.error("エラー: Google APIキーが設定されていません。"); st.stop()
+try: genai.configure(api_key=api_key)
+except Exception as e: st.error(f"APIキーの設定中にエラーが発生しました: {e}"); st.stop()
+
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+TABLE_NAME = "main_data" # プロンプトで使うので定義
+
+# --- データベース/バックエンド関連 ---
 
 # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-# 修正点: 自動リトライ機能とタイムアウト調整を実装
+# 修正点: スキーマ情報をフロントエンドでキャッシュする
 # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-def call_analyze_api(question: str, max_retries=1, delay=2):
-    """
-    バックエンドの /analyze エンドポイントを呼び出す。
-    サーバーのスリープからの復帰を考慮し、自動リトライ機能を実装。
-    """
-    api_endpoint = f"{BACKEND_URL}/analyze"
-    payload = {"question": question}
+@st.cache_data(ttl=3600) # 1時間キャッシュ
+def get_schema_from_backend():
+    """バックエンドに固定のクエリを送り、スキーマ情報を取得する"""
+    # この関数はバックエンドに負荷をかけないよう、結果をキャッシュする
+    # バックエンド側でスキーマ取得用のエンドポイントを作るのが理想だが、今回は簡易的にSQL実行エンドポイントを使う
+    sql_to_get_schema = "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'main_data';"
     
-    for attempt in range(max_retries + 1):
-        try:
-            # タイムアウトを60秒に設定
-            response = requests.post(api_endpoint, json=payload, timeout=60)
-            
-            # 500番台のエラー(サーバー内部エラー)の場合、リトライを試みる
-            if 500 <= response.status_code < 600 and attempt < max_retries:
-                st.info(f"サーバーが応答しませんでした。再試行します... ({attempt + 1}/{max_retries})")
-                time.sleep(delay) # 数秒待つ
-                continue # 次の試行へ
+    api_endpoint = f"{BACKEND_URL}/execute-sql"
+    payload = {"sql_query": sql_to_get_schema}
+    
+    try:
+        response = requests.post(api_endpoint, json=payload, timeout=60)
+        response.raise_for_status()
+        schema_raw = response.json().get("result", [])
+        
+        schema_str = "テーブルスキーマ:\n"
+        for item in schema_raw:
+            schema_str += f"- {item['column_name']} ({item['data_type']})\n"
+        return schema_str
+    except Exception as e:
+        st.error(f"バックエンドからスキーマ情報の取得に失敗しました: {e}")
+        return None
 
-            # その他のエラーコード(400番台など)の場合は、即座にエラーとして処理
-            response.raise_for_status()
-            
-            # 成功した場合は、結果を返してループを抜ける
-            return response.json()
-            
-        except requests.exceptions.RequestException as e:
-            # 接続エラーやタイムアウトなどのネットワーク関連のエラー
-            # これが発生した場合、リトライしても無駄なことが多いので、即座にエラーとする
-            st.error(f"バックエンドサーバーへの接続に失敗しました: {e}")
-            st.info(f"バックエンドサーバー({BACKEND_URL})が正しく起動しているか、URLが正しいか確認してください。")
-            return None
+def execute_sql_on_backend(sql_query: str):
+    """バックエンドの /execute-sql エンドポイントを呼び出す"""
+    api_endpoint = f"{BACKEND_URL}/execute-sql"
+    payload = {"sql_query": sql_query}
+    
+    try:
+        response = requests.post(api_endpoint, json=payload, timeout=60)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"バックENDサーバーへの接続に失敗しました: {e}")
+        return None
 
-    # すべてのリトライが失敗した場合
-    st.error("サーバーが応答しませんでした。時間をおいてから再度お試しください。")
-    return None
+# --- LLMロジック (バックエンドからフロントエンドに移動) ---
+try: model = genai.GenerativeModel('gemini-1.5-flash')
+except Exception as e: st.error(f"Geminiモデルの読み込み中にエラーが発生しました: {e}"); st.stop()
 
-# (以降のコードは変更なし。念のため完全なコードを記載)
+def create_prompt(user_question, schema_info):
+    # このプロンプトは、以前バックエンドにあったものとほぼ同じ
+    system_prompt = f"""
+あなたは、PostgreSQLデータベースを操作する優秀なSQLデータアナリストです。
+`{TABLE_NAME}` という名前のテーブルを分析し、以下のタスクを実行してください。
+{schema_info}
+# 主要な列の解説
+- "金額", "支出先の合計支出額": これらの金額列には、データが存在しないNULL値が含まれています。
+# あなたのタスク
+ユーザーからの自然言語による質問を解釈し、その答えを導き出すための**PostgreSQLで実行可能なSQLクエリを1つだけ**生成してください。
+# 遵守すべきルール
+1. SQL内の列名は、必ずダブルクォート `"` で囲んでください。
+2. **計算の場合**: `NULL`を`0`として扱うため `COALESCE(column, 0)` を使用してください。
+3. **フィルタリング/ランキングの場合**: `WHERE "列名" IS NOT NULL` を使用してください。
+4. ユーザーの入力の表記揺れを吸収するため、`LIKE` 演算子を使用してください。
+5. 集計関数には `AS` を使って分かりやすい別名を付けてください。
+6. 回答には、SQLクエリ以外の説明を含めず、SQLクエリのみを出力してください。
+7. SQLクエリは、```sql ... ``` のようにマークダウンで囲んで出力してください。
+"""
+    full_prompt = f"{system_prompt}\n\n# ユーザーの質問\n{user_question}"
+    return full_prompt
+
+
+# --- Streamlit UI 本体 ---
+st.title("自然言語DB分析ツール 💬")
+st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
+
+# アプリ起動時に一度だけスキーマ情報を取得
+db_schema_info = get_schema_from_backend()
+
+if not db_schema_info:
+    st.error("データベースのスキーマ情報を取得できませんでした。バックエンドが正しく動作しているか確認してください。")
+    st.stop()
+
+# (以降のUI部分は、呼び出す関数が変わる以外はほぼ同じ)
+# (念のため完全なコードを記載)
 
 def format_japanese_currency(num):
     if not isinstance(num, (int, float, np.number)) or num == 0: return "0円"
@@ -92,8 +143,6 @@ def generate_sample_questions(num_questions=5):
         samples.append(template.format(ministry=ministry))
     return samples
 
-st.title("自然言語DB分析ツール 💬")
-st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
 st.markdown("""<style>div[data-testid="stButton"] > button {text-align: left !important; width: 100%; justify-content: flex-start !important;}</style>""", unsafe_allow_html=True)
 def set_question_text(question):
     st.session_state.user_question_input = question
@@ -109,15 +158,29 @@ with st.form("question_form"):
     submitted = st.form_submit_button("質問する")
 
 if submitted and user_question:
-    with st.spinner("バックエンドサーバーに問い合わせ中..."):
-        api_response = call_analyze_api(user_question)
+    generated_sql = ""
+    with st.spinner("AIがSQLを生成中..."):
+        prompt = create_prompt(user_question, db_schema_info)
+        try:
+            response = model.generate_content(prompt)
+            generated_sql = response.text.strip().replace("```sql", "").replace("```", "").strip()
+            st.success("SQLの生成が完了しました！")
+        except Exception as e:
+            st.error(f"SQLの生成中にエラーが発生しました: {e}")
+            st.stop()
+    
+    with st.spinner("バックエンドサーバーでSQLを実行中..."):
+        api_response = execute_sql_on_backend(generated_sql)
+
     if api_response:
         st.success("データの取得が完了しました！")
-        generated_sql = api_response.get("generated_sql", "N/A")
-        result_data = api_response.get("result", [])
-        with st.expander("バックエンドで実行されたSQLクエリ"):
+        
+        with st.expander("AIによって生成され、バックエンドで実行されたSQLクエリ"):
             st.code(generated_sql, language="sql")
+            
+        result_data = api_response.get("result", [])
         result_df = pd.DataFrame(result_data)
+        
         if result_df.empty:
             st.warning("分析結果が0件でした。")
         elif result_df.shape == (1, 1) and pd.api.types.is_numeric_dtype(result_df.iloc[0,0]):
