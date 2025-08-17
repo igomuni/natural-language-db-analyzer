@@ -6,7 +6,7 @@ import requests
 import random
 import time
 import google.generativeai as genai
-from google.api_core import exceptions # Google APIの例外をインポート
+from google.api_core import exceptions
 from dotenv import load_dotenv 
 
 # --- 初期設定 ---
@@ -16,8 +16,10 @@ if not api_key: st.error("エラー: Google APIキーが設定されていませ
 try: genai.configure(api_key=api_key)
 except Exception as e: st.error(f"APIキーの設定中にエラーが発生しました: {e}"); st.stop()
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://12.0.0.1:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 TABLE_NAME = "main_data"
+# SQL直接実行モード用のパスワードをSecretsから読み込む
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 
 # --- データベース/バックエンド関連 ---
 
@@ -60,7 +62,7 @@ def execute_sql_on_backend(sql_query: str):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"バックENDサーバーへの接続に失敗しました: {e}")
+        st.error(f"バックエンドサーバーへの接続に失敗しました: {e}")
         return None
 
 # --- LLMロジック ---
@@ -88,16 +90,7 @@ def create_prompt(user_question, schema_info):
     full_prompt = f"{system_prompt}\n\n# ユーザーの質問\n{user_question}"
     return full_prompt
 
-# --- Streamlit UI 本体 ---
-st.title("自然言語DB分析ツール 💬")
-st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
-
-db_schema_info = get_schema_from_backend()
-
-if not db_schema_info:
-    st.error("データベースのスキーマ情報を取得できませんでした。バックエンドが正しく動作しているか確認してください。")
-    st.stop()
-
+# --- 表示関連の補助関数 ---
 def format_japanese_currency(num):
     if not isinstance(num, (int, float, np.number)) or num == 0: return "0円"
     num = int(num)
@@ -115,6 +108,7 @@ def format_japanese_currency(num):
         else: result += f"{remainder}円"
     return result + "円"
 
+# --- サンプル質問生成 ---
 MINISTRIES = [
     'こども家庭庁', 'カジノ管理委員会', 'スポーツ庁', 'デジタル庁', '中央労働委員会',
     '個人情報保護委員会', '公安調査庁', '公害等調整委員会', '公正取引委員会', '内閣官房',
@@ -140,65 +134,120 @@ def generate_sample_questions(num_questions=5):
         samples.append(template.format(ministry=ministry))
     return samples
 
-st.markdown("""<style>div[data-testid="stButton"] > button {text-align: left !important; width: 100%; justify-content: flex-start !important;}</style>""", unsafe_allow_html=True)
-def set_question_text(question):
-    st.session_state.user_question_input = question
-with st.expander("質問のヒント (クリックして表示)"):
-    st.info("以下のような質問ができます。クリックすると入力欄にコピーされます。")
-    sample_questions = generate_sample_questions(5)
-    for q in sample_questions:
-        st.button(q, on_click=set_question_text, args=(q,), key=f"btn_{q}")
-with st.form("question_form"):
-    user_question = st.text_area("分析したいことを日本語で入力してください:", 
-                                 key="user_question_input",
-                                 placeholder="例: こども家庭庁による支出を、金額が大きい順に5件教えて。")
-    submitted = st.form_submit_button("質問する")
 
-if submitted and user_question:
-    generated_sql = ""
-    with st.spinner("AIがSQLを生成中..."):
-        prompt = create_prompt(user_question, db_schema_info)
-        try:
-            response = model.generate_content(prompt)
-            generated_sql = response.text.strip().replace("```sql", "").replace("```", "").strip()
-            st.success("SQLの生成が完了しました！")
-        
-        except exceptions.ResourceExhausted as e:
-            st.error("AIへのリクエストが無料利用枠の上限に達しました。しばらく時間をおいてから再試行してください。")
-            st.info("これはアプリの仕様です。開発者の方は、Google Cloudで請求先アカウントを有効にすることで、この制限を緩和できます。")
-            st.stop()
-        except Exception as e:
-            st.error(f"SQLの生成中に予期せぬエラーが発生しました: {e}")
-            st.stop()
+# --- Streamlit UI 本体 ---
+
+st.title("自然言語DB分析ツール 💬")
+st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
+
+db_schema_info = get_schema_from_backend()
+
+if not db_schema_info:
+    st.error("データベースのスキーマ情報を取得できませんでした。バックエンドが正しく動作しているか確認してください。")
+    st.stop()
     
-    with st.spinner("バックエンドサーバーでSQLを実行中..."):
-        api_response = execute_sql_on_backend(generated_sql)
+# --- 管理者向けSQL実行モードのUI ---
 
-    if api_response:
-        st.success("データの取得が完了しました！")
+st.sidebar.header("管理者モード")
+enable_direct_sql = st.sidebar.checkbox("SQLを直接実行する")
+
+is_admin_mode = False
+# ADMIN_PASSWORDが設定されている場合のみ、認証ロジックを実行
+if ADMIN_PASSWORD and enable_direct_sql:
+    password_input = st.sidebar.text_input("パスワードを入力してください", type="password")
+    if password_input == ADMIN_PASSWORD:
+        st.sidebar.success("認証成功！")
+        is_admin_mode = True
+    elif password_input:
+        st.sidebar.error("パスワードが違います。")
+elif enable_direct_sql: # チェックボックスはONだが、パスワードがSecretsに設定されていない場合
+    st.sidebar.warning("管理者パスワードが設定されていません。")
+
+
+# --- メイン画面の表示をモードによって切り替える ---
+
+if is_admin_mode:
+    # --- 管理者モードのUI ---
+    st.info("管理者モード: SQLを直接実行します。")
+    
+    with st.expander("テーブルスキーマを表示"):
+        st.code(db_schema_info, language="text")
         
-        with st.expander("AIによって生成され、バックエンドで実行されたSQLクエリ"):
-            st.code(generated_sql, language="sql")
-            
-        result_data = api_response.get("result", [])
-        result_df = pd.DataFrame(result_data)
+    with st.form("sql_form"):
+        sql_query_input = st.text_area("実行するSELECT文を入力してください:", height=200,
+                                      placeholder='SELECT * FROM "main_data" LIMIT 5;')
+        sql_submitted = st.form_submit_button("SQLを実行")
+
+    if sql_submitted and sql_query_input:
+        with st.spinner("バックエンドサーバーでSQLを実行中..."):
+            api_response = execute_sql_on_backend(sql_query_input)
         
-        if result_df.empty:
-            st.warning("分析結果が0件でした。")
-        elif result_df.shape == (1, 1) and pd.api.types.is_numeric_dtype(result_df.iloc[0,0]):
-            value = result_df.iloc[0, 0]
-            label = result_df.columns[0]
-            if pd.isna(value):
-                st.metric(label=label, value="―", delta="該当するデータがありませんでした", delta_color="inverse")
-            else:
-                is_monetary = '金額' in label or '額' in label
-                if is_monetary:
-                    formatted_comma_value = f"{int(value):,} 円"
-                    formatted_japanese_value = format_japanese_currency(value)
-                    st.metric(label=label, value=formatted_comma_value, delta=formatted_japanese_value, delta_color="off")
-                else:
-                    formatted_value = f"{int(value):,} 件"
-                    st.metric(label=label, value=formatted_value)
-        else:
-            st.write(f"**分析結果:** {len(result_df)} 件")
+        if api_response:
+            st.success("データの取得が完了しました！")
+            result_data = api_response.get("result", [])
+            result_df = pd.DataFrame(result_data)
+            st.write(f"**実行結果:** {len(result_df)} 件")
             st.dataframe(result_df.style.format(precision=0, thousands=","))
+else:
+    # --- 通常の自然言語モードのUI ---
+    st.markdown("""<style>div[data-testid="stButton"] > button {text-align: left !important; width: 100%; justify-content: flex-start !important;}</style>""", unsafe_allow_html=True)
+    def set_question_text(question):
+        st.session_state.user_question_input = question
+        
+    with st.expander("質問のヒント (クリックして表示)"):
+        st.info("以下のような質問ができます。クリックすると入力欄にコピーされます。")
+        sample_questions = generate_sample_questions(5)
+        for q in sample_questions:
+            st.button(q, on_click=set_question_text, args=(q,), key=f"btn_{q}")
+
+    with st.form("question_form"):
+        user_question = st.text_area("分析したいことを日本語で入力してください:", 
+                                     key="user_question_input",
+                                     placeholder="例: こども家庭庁による支出を、金額が大きい順に5件教えて。")
+        submitted = st.form_submit_button("質問する")
+
+    if submitted and user_question:
+        generated_sql = ""
+        with st.spinner("AIがSQLを生成中..."):
+            prompt = create_prompt(user_question, db_schema_info)
+            try:
+                response = model.generate_content(prompt)
+                generated_sql = response.text.strip().replace("```sql", "").replace("```", "").strip()
+                st.success("SQLの生成が完了しました！")
+            except exceptions.ResourceExhausted as e:
+                st.error("AIへのリクエストが無料利用枠の上限に達しました。しばらく時間をおいてから再試行してください。")
+                st.info("これはアプリの仕様です。開発者の方は、Google Cloudで請求先アカウントを有効にすることで、この制限を緩和できます。")
+                st.stop()
+            except Exception as e:
+                st.error(f"SQLの生成中に予期せぬエラーが発生しました: {e}")
+                st.stop()
+        
+        with st.spinner("バックエンドサーバーでSQLを実行中..."):
+            api_response = execute_sql_on_backend(generated_sql)
+
+        if api_response:
+            st.success("データの取得が完了しました！")
+            with st.expander("AIによって生成され、バックエンドで実行されたSQLクエリ"):
+                st.code(generated_sql, language="sql")
+            result_data = api_response.get("result", [])
+            result_df = pd.DataFrame(result_data)
+            
+            if result_df.empty:
+                st.warning("分析結果が0件でした。")
+            elif result_df.shape == (1, 1) and pd.api.types.is_numeric_dtype(result_df.iloc[0,0]):
+                value = result_df.iloc[0, 0]
+                label = result_df.columns[0]
+                if pd.isna(value):
+                    st.metric(label=label, value="―", delta="該当するデータがありませんでした", delta_color="inverse")
+                else:
+                    is_monetary = '金額' in label or '額' in label
+                    if is_monetary:
+                        formatted_comma_value = f"{int(value):,} 円"
+                        formatted_japanese_value = format_japanese_currency(value)
+                        st.metric(label=label, value=formatted_comma_value, delta=formatted_japanese_value, delta_color="off")
+                    else:
+                        formatted_value = f"{int(value):,} 件"
+                        st.metric(label=label, value=formatted_value)
+            else:
+                st.write(f"**分析結果:** {len(result_df)} 件")
+                st.dataframe(result_df.style.format(precision=0, thousands=","))
