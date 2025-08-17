@@ -114,9 +114,9 @@ if submitted and user_question:
                 st.metric(label=label, value="―", delta="該当するデータがありませんでした", delta_color="inverse")
             else:
                 # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-                # 修正点: 文脈判断の条件に「額」を追加
+                # 修正点: 文脈判断の基準を「結果の列名(label)」のみに限定する
                 # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-                is_monetary = '金額' in generated_sql or '金額' in label or '額' in label
+                is_monetary = '金額' in label or '額' in label
 
                 if is_monetary:
                     formatted_comma_value = f"{int(value):,} 円"
