@@ -4,54 +4,60 @@ import pandas as pd
 import numpy as np
 import requests 
 import random
-import time
-import google.generativeai as genai # AIライブラリをフロントエンドに再インポート
-from dotenv import load_dotenv # ローカルテスト用にdotenvを追加
+import time # Ensure time is imported
+import google.generativeai as genai
+from dotenv import load_dotenv
 
 # --- 初期設定 ---
-load_dotenv() # ローカルの.envを読み込む
-# Streamlit CloudではSecretsから、ローカルでは.envからAPIキーを取得
+load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY") 
 if not api_key: st.error("エラー: Google APIキーが設定されていません。"); st.stop()
 try: genai.configure(api_key=api_key)
 except Exception as e: st.error(f"APIキーの設定中にエラーが発生しました: {e}"); st.stop()
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
-TABLE_NAME = "main_data" # プロンプトで使うので定義
-
-# --- データベース/バックエンド関連 ---
+TABLE_NAME = "main_data"
 
 # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-# 修正点: スキーマ情報をフロントエンドでキャッシュする
+# 修正点: スキーマ取得関数にリトライ機能を追加
 # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-@st.cache_data(ttl=3600) # 1時間キャッシュ
-def get_schema_from_backend():
-    """バックエンドに固定のクエリを送り、スキーマ情報を取得する"""
-    # この関数はバックエンドに負荷をかけないよう、結果をキャッシュする
-    # バックエンド側でスキーマ取得用のエンドポイントを作るのが理想だが、今回は簡易的にSQL実行エンドポイントを使う
+@st.cache_data(ttl=3600)
+def get_schema_from_backend(max_retries=2, delay=3):
+    """バックエンドに固定のクエリを送り、スキーマ情報を取得する。コールドスタートを考慮しリトライする。"""
     sql_to_get_schema = "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'main_data';"
-    
     api_endpoint = f"{BACKEND_URL}/execute-sql"
     payload = {"sql_query": sql_to_get_schema}
     
-    try:
-        response = requests.post(api_endpoint, json=payload, timeout=60)
-        response.raise_for_status()
-        schema_raw = response.json().get("result", [])
-        
-        schema_str = "テーブルスキーマ:\n"
-        for item in schema_raw:
-            schema_str += f"- {item['column_name']} ({item['data_type']})\n"
-        return schema_str
-    except Exception as e:
-        st.error(f"バックエンドからスキーマ情報の取得に失敗しました: {e}")
-        return None
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(api_endpoint, json=payload, timeout=60)
+            response.raise_for_status()
+            schema_raw = response.json().get("result", [])
+            
+            schema_str = "テーブルスキーマ:\n"
+            for item in schema_raw:
+                schema_str += f"- {item['column_name']} ({item['data_type']})\n"
+            return schema_str
+        except requests.exceptions.HTTPError as e:
+            # 404エラーの場合のみリトライする
+            if e.response.status_code == 404 and attempt < max_retries - 1:
+                st.warning(f"バックエンドが準備中のようです。再試行します... ({attempt + 1}/{max_retries-1})")
+                time.sleep(delay)
+                continue
+            else:
+                st.error(f"バックエンドからスキーマ情報の取得に失敗しました (HTTP Error): {e}")
+                return None
+        except Exception as e:
+            st.error(f"バックエンドからスキーマ情報の取得中に予期せぬエラーが発生しました: {e}")
+            return None
+    return None # すべてのリトライが失敗した場合
+
+# (The rest of the app.py file remains the same)
+# (For completeness, the full code is below)
 
 def execute_sql_on_backend(sql_query: str):
-    """バックエンドの /execute-sql エンドポイントを呼び出す"""
     api_endpoint = f"{BACKEND_URL}/execute-sql"
     payload = {"sql_query": sql_query}
-    
     try:
         response = requests.post(api_endpoint, json=payload, timeout=60)
         response.raise_for_status()
@@ -60,12 +66,10 @@ def execute_sql_on_backend(sql_query: str):
         st.error(f"バックENDサーバーへの接続に失敗しました: {e}")
         return None
 
-# --- LLMロジック (バックエンドからフロントエンドに移動) ---
 try: model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception as e: st.error(f"Geminiモデルの読み込み中にエラーが発生しました: {e}"); st.stop()
 
 def create_prompt(user_question, schema_info):
-    # このプロンプトは、以前バックエンドにあったものとほぼ同じ
     system_prompt = f"""
 あなたは、PostgreSQLデータベースを操作する優秀なSQLデータアナリストです。
 `{TABLE_NAME}` という名前のテーブルを分析し、以下のタスクを実行してください。
@@ -86,20 +90,14 @@ def create_prompt(user_question, schema_info):
     full_prompt = f"{system_prompt}\n\n# ユーザーの質問\n{user_question}"
     return full_prompt
 
-
-# --- Streamlit UI 本体 ---
 st.title("自然言語DB分析ツール 💬")
 st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
 
-# アプリ起動時に一度だけスキーマ情報を取得
 db_schema_info = get_schema_from_backend()
 
 if not db_schema_info:
     st.error("データベースのスキーマ情報を取得できませんでした。バックエンドが正しく動作しているか確認してください。")
     st.stop()
-
-# (以降のUI部分は、呼び出す関数が変わる以外はほぼ同じ)
-# (念のため完全なコードを記載)
 
 def format_japanese_currency(num):
     if not isinstance(num, (int, float, np.number)) or num == 0: return "0円"

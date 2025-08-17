@@ -32,6 +32,7 @@ class SQLRequest(BaseModel):
 
 @app.get("/")
 def read_root():
+    # Health check endpoint
     return {"message": "Secure SQL Runner is running!"}
 
 @app.post("/execute-sql")
