@@ -4,9 +4,10 @@ import pandas as pd
 import numpy as np
 import requests 
 import random
-import time # Ensure time is imported
+import time
 import google.generativeai as genai
-from dotenv import load_dotenv
+from google.api_core import exceptions # Google APIの例外をインポート
+from dotenv import load_dotenv 
 
 # --- 初期設定 ---
 load_dotenv()
@@ -15,12 +16,11 @@ if not api_key: st.error("エラー: Google APIキーが設定されていませ
 try: genai.configure(api_key=api_key)
 except Exception as e: st.error(f"APIキーの設定中にエラーが発生しました: {e}"); st.stop()
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://12.0.0.1:8000")
 TABLE_NAME = "main_data"
 
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-# 修正点: スキーマ取得関数にリトライ機能を追加
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+# --- データベース/バックエンド関連 ---
+
 @st.cache_data(ttl=3600)
 def get_schema_from_backend(max_retries=2, delay=3):
     """バックエンドに固定のクエリを送り、スキーマ情報を取得する。コールドスタートを考慮しリトライする。"""
@@ -39,7 +39,6 @@ def get_schema_from_backend(max_retries=2, delay=3):
                 schema_str += f"- {item['column_name']} ({item['data_type']})\n"
             return schema_str
         except requests.exceptions.HTTPError as e:
-            # 404エラーの場合のみリトライする
             if e.response.status_code == 404 and attempt < max_retries - 1:
                 st.warning(f"バックエンドが準備中のようです。再試行します... ({attempt + 1}/{max_retries-1})")
                 time.sleep(delay)
@@ -50,12 +49,10 @@ def get_schema_from_backend(max_retries=2, delay=3):
         except Exception as e:
             st.error(f"バックエンドからスキーマ情報の取得中に予期せぬエラーが発生しました: {e}")
             return None
-    return None # すべてのリトライが失敗した場合
-
-# (The rest of the app.py file remains the same)
-# (For completeness, the full code is below)
+    return None
 
 def execute_sql_on_backend(sql_query: str):
+    """バックエンドの /execute-sql エンドポイントを呼び出す"""
     api_endpoint = f"{BACKEND_URL}/execute-sql"
     payload = {"sql_query": sql_query}
     try:
@@ -66,6 +63,7 @@ def execute_sql_on_backend(sql_query: str):
         st.error(f"バックENDサーバーへの接続に失敗しました: {e}")
         return None
 
+# --- LLMロジック ---
 try: model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception as e: st.error(f"Geminiモデルの読み込み中にエラーが発生しました: {e}"); st.stop()
 
@@ -85,11 +83,12 @@ def create_prompt(user_question, schema_info):
 4. ユーザーの入力の表記揺れを吸収するため、`LIKE` 演算子を使用してください。
 5. 集計関数には `AS` を使って分かりやすい別名を付けてください。
 6. 回答には、SQLクエリ以外の説明を含めず、SQLクエリのみを出力してください。
-7. SQLクエリは、```sql ... ``` のようにマークダウンで囲んで出力してください。
+7. SQLクエリは、```sql ... ``` のようにマークダウンのコードブロックで囲んで出力してください。
 """
     full_prompt = f"{system_prompt}\n\n# ユーザーの質問\n{user_question}"
     return full_prompt
 
+# --- Streamlit UI 本体 ---
 st.title("自然言語DB分析ツール 💬")
 st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
 
@@ -163,8 +162,13 @@ if submitted and user_question:
             response = model.generate_content(prompt)
             generated_sql = response.text.strip().replace("```sql", "").replace("```", "").strip()
             st.success("SQLの生成が完了しました！")
+        
+        except exceptions.ResourceExhausted as e:
+            st.error("AIへのリクエストが無料利用枠の上限に達しました。しばらく時間をおいてから再試行してください。")
+            st.info("これはアプリの仕様です。開発者の方は、Google Cloudで請求先アカウントを有効にすることで、この制限を緩和できます。")
+            st.stop()
         except Exception as e:
-            st.error(f"SQLの生成中にエラーが発生しました: {e}")
+            st.error(f"SQLの生成中に予期せぬエラーが発生しました: {e}")
             st.stop()
     
     with st.spinner("バックエンドサーバーでSQLを実行中..."):
