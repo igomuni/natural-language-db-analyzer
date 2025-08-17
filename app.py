@@ -1,108 +1,130 @@
 import os
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from dotenv import load_dotenv
-import google.generativeai as genai
-import psycopg2 
+import streamlit as st
 import pandas as pd
 import numpy as np
+import requests 
+import random
 
 # --- 初期設定 ---
-load_dotenv()
-try:
-    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-except Exception as e:
-    print(f"APIキーの設定中にエラーが発生しました: {e}")
-DATABASE_URL = os.getenv("DATABASE_URL")
-app = FastAPI(
-    title="Natural Language DB Analyzer API",
-    description="自然言語の質問を解釈し、データベースを分析して結果を返すAPIです。",
-    version="1.0.0",
-)
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
-# --- データベース接続 ---
-def get_db_connection():
+# --- バックエンドAPIを呼び出す関数 ---
+def call_analyze_api(question: str):
+    api_endpoint = f"{BACKEND_URL}/analyze"
+    payload = {"question": question}
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
+        response = requests.post(api_endpoint, json=payload, timeout=300)
+        response.raise_for_status() 
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"バックエンドサーバーへの接続に失敗しました: {e}")
+        st.info(f"バックエンドサーバー({BACKEND_URL})が正しく起動しているか、URLが正しいか確認してください。")
+        return None
     except Exception as e:
-        print(f"データベース接続エラー: {e}")
-        raise HTTPException(status_code=500, detail=f"データベースに接続できませんでした: {e}")
+        st.error(f"予期せぬエラーが発生しました: {e}")
+        return None
 
-# --- スキーマ情報（キャッシュ）---
-db_schema_info = None
-try:
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT column_name, data_type 
-                FROM information_schema.columns 
-                WHERE table_name = 'main_data';
-            """)
-            schema_info_raw = cur.fetchall()
-            schema_str = "テーブルスキーマ:\n"
-            for col_name, data_type in schema_info_raw:
-                schema_str += f"- {col_name} ({data_type})\n"
-            db_schema_info = schema_str
-except Exception as e:
-    print(f"起動時のスキーマ情報取得に失敗しました: {e}")
+# --- 表示関連の補助関数 ---
+def format_japanese_currency(num):
+    if not isinstance(num, (int, float, np.number)) or num == 0: return "0円"
+    num = int(num)
+    units = {'兆': 10**12, '億': 10**8, '万': 10**4}
+    if num < 10000: return f"{num:,}円"
+    result = ""
+    remainder = num
+    for unit, value in units.items():
+        if remainder >= value:
+            quotient = int(remainder // value)
+            result += f"{quotient}{unit}"
+            remainder %= value
+    if remainder > 0:
+        if num >= 10000 and result != "": pass
+        else: result += f"{remainder}円"
+    return result + "円"
 
-# --- LLM関連のロジック ---
-try:
-    model = genai.GenerativeModel('gemini-1.5-flash')
-except Exception as e:
-    print(f"Geminiモデルの読み込み中にエラーが発生しました: {e}")
+# --- サンプル質問生成 ---
+MINISTRIES = [
+    'こども家庭庁', 'カジノ管理委員会', 'スポーツ庁', 'デジタル庁', '中央労働委員会',
+    '個人情報保護委員会', '公安調査庁', '公害等調整委員会', '公正取引委員会', '内閣官房',
+    '内閣府', '厚生労働省', '原子力規制委員会', '国土交通省', '国土交通省　気象庁',
+    '国土交通省　海上保安庁', '国土交通省　観光庁', '国土交通省　運輸安全委員会',
+    '国税庁', '外務省', '復興庁', '文化庁', '文部科学省', '林野庁', '水産庁',
+    '法務省', '消費者庁', '消防庁', '特許庁', '環境省', '経済産業省', '総務省',
+    '警察庁', '財務省', '農林水産省', '金融庁', '防衛省'
+]
+QUESTION_TEMPLATES = [
+    "{ministry}の支出額の合計はいくらですか？",
+    "{ministry}が最も多く支出している事業名トップ3を教えてください。",
+    "{ministry}への支出で、契約相手が多い法人名を5つリストアップしてください。",
+    "{ministry}関連の事業で、入札者数が1だった契約の件数を教えて。",
+    "{ministry}による支出を、金額が大きい順に5件、事業名と支出先名、金額を教えて。",
+    "支出額が10億円を超えている契約のうち、{ministry}が関わっているものをリストアップして。",
+]
+def generate_sample_questions(num_questions=5):
+    samples = []
+    for _ in range(num_questions):
+        ministry = random.choice(MINISTRIES)
+        template = random.choice(QUESTION_TEMPLATES)
+        samples.append(template.format(ministry=ministry))
+    return samples
 
-def create_prompt(user_question, schema_info):
-    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-    # 修正点: NULLの扱いに関する指示を、より高度なものに更新
-    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-    system_prompt = f"""
-あなたは、PostgreSQLデータベースを操作する優秀なSQLデータアナリストです。
-`main_data` という名前のテーブルを分析し、以下のタスクを実行してください。
+# --- Streamlit UI 本体 ---
+st.title("自然言語DB分析ツール 💬")
+st.caption("行政事業レビューデータを元に、自然言語で質問できます。")
 
-{schema_info}
+st.markdown("""<style>div[data-testid="stButton"] > button {text-align: left !important; width: 100%; justify-content: flex-start !important;}</style>""", unsafe_allow_html=True)
 
-# 主要な列の解説
-- "金額", "支出先の合計支出額": これらの金額列には、データが存在しないNULL値が含まれています。
+def set_question_text(question):
+    st.session_state.user_question_input = question
 
-# あなたのタスク
-ユーザーからの自然言語による質問を解釈し、その答えを導き出すための**PostgreSQLで実行可能なSQLクエリを1つだけ**生成してください。
+with st.expander("質問のヒント (クリックして表示)"):
+    st.info("以下のような質問ができます。クリックすると入力欄にコピーされます。")
+    sample_questions = generate_sample_questions(5)
+    for q in sample_questions:
+        st.button(q, on_click=set_question_text, args=(q,), key=f"btn_{q}")
 
-# 遵守すべきルール
-1. SQL内の列名は、必ずダブルクォート `"` で囲んでください。
-2. **非常に重要**: 金額の合計や差額などを計算する際、`NULL`値を単純に無視すると正しい結果になりません。`COALESCE`関数を使い、`NULL`を`0`として扱って計算してください。
-   - 記述例: `SUM(COALESCE("金額", 0))`
-   - この方法を使えば、`WHERE "金額" IS NOT NULL`のようなフィルタリングは不要になり、より正確な計算ができます。
-3. **ランキングやフィルタリングの場合のみ**: 特定の列の値で順位付けしたり、フィルタリングしたりする場合は、引き続き `WHERE "列名" IS NOT NULL` を使用してください。
-4. ユーザーの入力には表記揺れが含まれる可能性があるため、`LIKE` 演算子と `%` を使った部分一致検索を積極的に使用してください。
-5. `SUM` や `COUNT` などの集計関数を使用する場合は、`AS` を使って結果の列に分かりやすい別名（例: `AS "合計金額"`）を付けてください。
-6. 回答には、SQLクエリ以外の説明、前置き、後書きを含めないでください。
-7. SQLクエリは、```sql ... ``` のようにマークダウンのコードブロックで囲んで出力してください。
-"""
-    full_prompt = f"{system_prompt}\n\n# ユーザーの質問\n{user_question}"
-    return full_prompt
+with st.form("question_form"):
+    user_question = st.text_area("分析したいことを日本語で入力してください:", 
+                                 key="user_question_input",
+                                 placeholder="例: こども家庭庁による支出を、金額が大きい順に5件教えて。")
+    submitted = st.form_submit_button("質問する")
 
-# --- APIエンドポイントの定義 ---
-class QuestionRequest(BaseModel):
-    question: str
-@app.get("/")
-def read_root(): return {"message": "Backend server is running!"}
-@app.post("/analyze")
-def analyze_data(request: QuestionRequest):
-    user_question = request.question
-    if not user_question: raise HTTPException(status_code=400, detail="質問が空です。")
-    if not db_schema_info or not model: raise HTTPException(status_code=500, detail="サーバーの初期設定が完了していません。")
-    prompt = create_prompt(user_question, db_schema_info)
-    try:
-        response = model.generate_content(prompt)
-        generated_sql = response.text.strip().replace("```sql", "").replace("```", "").strip()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"SQLの生成中にエラーが発生しました: {e}")
-    try:
-        with get_db_connection() as conn:
-            result_df = pd.read_sql_query(generated_sql, conn)
-        result_json = result_df.replace({pd.NA: None, np.nan: None}).to_dict(orient='records')
-        return {"generated_sql": generated_sql, "result": result_json}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"SQLの実行に失敗しました: {e}\n生成されたSQL: {generated_sql}")
+if submitted and user_question:
+    with st.spinner("バックエンドサーバーに問い合わせ中..."):
+        api_response = call_analyze_api(user_question)
+
+    if api_response:
+        st.success("データの取得が完了しました！")
+        
+        generated_sql = api_response.get("generated_sql", "N/A")
+        result_data = api_response.get("result", [])
+        
+        with st.expander("バックエンドで実行されたSQLクエリ"):
+            st.code(generated_sql, language="sql")
+            
+        result_df = pd.DataFrame(result_data)
+        
+        if result_df.empty:
+            st.warning("分析結果が0件でした。")
+        elif result_df.shape == (1, 1) and pd.api.types.is_numeric_dtype(result_df.iloc[0,0]):
+            value = result_df.iloc[0, 0]
+            label = result_df.columns[0]
+            
+            if pd.isna(value):
+                st.metric(label=label, value="―", delta="該当するデータがありませんでした", delta_color="inverse")
+            else:
+                # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                # 修正点: 文脈判断の基準を「結果の列名(label)」のみに限定する
+                # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                is_monetary = '金額' in label or '額' in label
+
+                if is_monetary:
+                    formatted_comma_value = f"{int(value):,} 円"
+                    formatted_japanese_value = format_japanese_currency(value)
+                    st.metric(label=label, value=formatted_comma_value, delta=formatted_japanese_value, delta_color="off")
+                else:
+                    formatted_value = f"{int(value):,} 件"
+                    st.metric(label=label, value=formatted_value)
+        else:
+            st.write(f"**分析結果:** {len(result_df)} 件")
+            st.dataframe(result_df.style.format(precision=0, thousands=","))
