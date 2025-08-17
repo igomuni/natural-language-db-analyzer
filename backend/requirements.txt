@@ -3,3 +3,5 @@ uvicorn[standard]
 google-generativeai
 psycopg2-binary
 python-dotenv
+pandas
+numpy
