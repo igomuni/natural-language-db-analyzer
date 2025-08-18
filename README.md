@@ -1,6 +1,6 @@
 # 自然言語DB分析ツール (Natural Language DB Analyzer)
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)]([YOUR_STREAMLIT_APP_URL])
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://natural-language-db-analyzer-20250816-2217.streamlit.app/)
 
 日本の行政事業レビュー「支出先・支出情報」のCSVデータを元に、自然言語（日本語）で質問するだけで、AIが自動的にSQLを生成し、データベースを分析して結果を返してくれるWebアプリケーションです。
 
